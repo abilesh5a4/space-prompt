@@ -2,22 +2,19 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { motion } from 'framer-motion';
-import {
-  Send,
-  Bot,
-  User,
-  Sparkles,
-} from 'lucide-react';
+import { Send, Bot, User, Sparkles } from 'lucide-react';
 import { VoiceButton, VoiceStatus } from '@/components/studio/voice-button';
 import { StudioResult } from '@/components/studio/studio-result';
-import { StudioError } from '@/components/studio/studio-error';
 import { SpaceOrbitAnimation } from '@/components/ui/space-orbit-animation';
+import { StarField } from '@/components/ui/star-field';
 import { useSpeechRecognition } from '@/hooks/use-speech-recognition';
-import { requestIntentAnalysis, type AnalyzeFailure } from '@/lib/analyze-client';
+import { requestIntentAnalysis } from '@/lib/analyze-client';
 import { requestClarifications } from '@/lib/clarify-client';
 import { buildPromptContext } from '@/lib/context/build-prompt-context';
 import { requestPromptGeneration } from '@/lib/generate-client';
-import { fadeUp, fadeIn } from '@/lib/motion';
+import { requestPromptRefinement } from '@/lib/refine-client';
+import { requestSavePrompt } from '@/lib/prompts-client';
+import { fadeUp } from '@/lib/motion';
 import {
   appendTranscript,
   clampIdea,
@@ -28,42 +25,48 @@ import {
 } from '@/lib/studio';
 import type { ClarificationAnswer, ClarificationQuestion, PromptSession } from '@/types';
 
-import { StarField } from '@/components/ui/star-field';
-
 export interface StudioComposerProps {
   initialIdea?: string;
   templateId?: string | null;
   categorySlug?: string | null;
 }
 
-function ThinkingIndicator({
-  phases = ['Thinking...', 'Analyzing your idea...', 'Building prompt context...'],
-}: {
-  phases?: string[];
-}) {
-  const [phaseIndex, setPhaseIndex] = useState(0);
+export type ChatMessage =
+  | { id: string; role: 'user'; type: 'user'; content: string }
+  | { id: string; role: 'assistant'; type: 'thinking'; content: string }
+  | {
+      id: string;
+      role: 'assistant';
+      type: 'clarification';
+      question: ClarificationQuestion;
+      questionIndex: number;
+      isAnswered: boolean;
+      selectedAnswer?: string;
+    }
+  | {
+      id: string;
+      role: 'assistant';
+      type: 'prompt';
+      promptText: string;
+      title: string;
+      savedPromptId?: string;
+      isLatestPrompt: boolean;
+    }
+  | { id: string; role: 'assistant'; type: 'error'; content: string };
 
-  useEffect(() => {
-    const timer = setInterval(() => {
-      setPhaseIndex((prev) => (prev + 1) % phases.length);
-    }, 2200);
-    return () => clearInterval(timer);
-  }, [phases.length]);
-
+function ThinkingIndicator({ label = 'Thinking...' }: { label?: string }) {
   return (
-    <div className="flex items-start gap-3">
-      <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-[#1A1A1A] border border-[#262626] text-[#38BDF8]">
+    <div className="flex items-start gap-3 my-2">
+      <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-[#181819] border border-[#29292B] text-[#38BDF8]">
         <Bot className="h-3.5 w-3.5" />
       </div>
-      <div className="rounded-2xl bg-[#141414] border border-[#262626] px-4 py-3 text-xs text-[#8E8E93] flex items-center gap-2.5 shadow-sm">
+      <div className="rounded-2xl bg-[#181819] border border-[#29292B] px-4 py-2.5 text-xs text-[#A1A1AA] flex items-center gap-2.5 shadow-xs">
         <span className="flex items-center gap-1 shrink-0">
           <span className="h-1.5 w-1.5 rounded-full bg-[#38BDF8] animate-pulse" />
           <span className="h-1.5 w-1.5 rounded-full bg-[#38BDF8] animate-pulse [animation-delay:0.2s]" />
           <span className="h-1.5 w-1.5 rounded-full bg-[#38BDF8] animate-pulse [animation-delay:0.4s]" />
         </span>
-        <span className="text-xs font-medium text-[#F2F2F2] transition-all duration-300">
-          {phases[phaseIndex]}
-        </span>
+        <span className="text-xs font-medium text-[#F4F4F5]">Space Prompt {label}</span>
       </div>
     </div>
   );
@@ -76,9 +79,10 @@ export function StudioComposer({
 }: StudioComposerProps) {
   const [ideaInput, setIdeaInput] = useState(() => clampIdea(initialIdea));
   const [session, setSession] = useState<PromptSession | null>(null);
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [validationError, setValidationError] = useState<string | null>(null);
-  const [failure, setFailure] = useState<AnalyzeFailure | null>(null);
   const [currentQuestionIndex, setCurrentQuestionIndex] = useState(0);
+  const [isProcessing, setIsProcessing] = useState(false);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -96,14 +100,14 @@ export function StudioComposer({
 
   useEffect(() => {
     scrollToBottom();
-  }, [session, currentQuestionIndex]);
+  }, [messages]);
 
   useEffect(() => {
     return () => abortRef.current?.abort();
   }, []);
 
   /**
-   * Pipeline executor to start a prompt session
+   * Start a new chat session from user initial input
    */
   const handleStartNewSession = useCallback(
     async (userInputText: string) => {
@@ -116,8 +120,24 @@ export function StudioComposer({
       }
 
       setValidationError(null);
-      setFailure(null);
       setIdeaInput('');
+      setIsProcessing(true);
+
+      const userMsg: ChatMessage = {
+        id: `user-init-${Date.now()}`,
+        role: 'user',
+        type: 'user',
+        content: trimmed,
+      };
+
+      const thinkingMsg: ChatMessage = {
+        id: `thinking-init-${Date.now()}`,
+        role: 'assistant',
+        type: 'thinking',
+        content: 'Thinking...',
+      };
+
+      setMessages([userMsg, thinkingMsg]);
 
       const newSession = createPromptSession({
         originalInput: trimmed,
@@ -125,7 +145,6 @@ export function StudioComposer({
         categorySlug,
         status: 'analyzing',
       });
-
       setSession(newSession);
 
       abortRef.current?.abort();
@@ -145,13 +164,23 @@ export function StudioComposer({
 
       if (controller.signal.aborted) {
         inFlightRef.current = false;
+        setIsProcessing(false);
         return;
       }
 
       if (!analyzeResult.ok) {
         inFlightRef.current = false;
-        setFailure(analyzeResult.error);
-        setSession((curr) => (curr ? { ...curr, status: 'error' } : null));
+        setIsProcessing(false);
+        setMessages((prev) =>
+          prev
+            .filter((m) => m.type !== 'thinking')
+            .concat({
+              id: `err-${Date.now()}`,
+              role: 'assistant',
+              type: 'error',
+              content: analyzeResult.error.message || 'Analysis failed. Please try again.',
+            }),
+        );
         return;
       }
 
@@ -161,7 +190,7 @@ export function StudioComposer({
         analysis: analyzeResult.analysis,
       };
 
-      // 2. Request Clarifications (keep status as 'analyzing' until clarifications arrive to avoid blank gap)
+      // 2. Request Clarifications
       const clarifyResult = await requestClarifications(
         {
           input: trimmed,
@@ -174,27 +203,51 @@ export function StudioComposer({
 
       if (controller.signal.aborted) {
         inFlightRef.current = false;
+        setIsProcessing(false);
         return;
       }
 
       if (!clarifyResult.ok) {
         inFlightRef.current = false;
-        setFailure(clarifyResult.error);
-        setSession((curr) => (curr ? { ...curr, status: 'error' } : null));
+        setIsProcessing(false);
+        setMessages((prev) =>
+          prev
+            .filter((m) => m.type !== 'thinking')
+            .concat({
+              id: `err-${Date.now()}`,
+              role: 'assistant',
+              type: 'error',
+              content: clarifyResult.error.message || 'Clarification failed. Please try again.',
+            }),
+        );
         return;
       }
 
       if (clarifyResult.clarifications && clarifyResult.clarifications.length > 0) {
-        setSession({
+        const fullSession: PromptSession = {
           ...analyzedSession,
           status: 'clarifying',
           clarifications: clarifyResult.clarifications,
           clarificationAnswers: {},
-        });
+        };
+        setSession(fullSession);
         setCurrentQuestionIndex(0);
         inFlightRef.current = false;
+        setIsProcessing(false);
+
+        const firstQ = clarifyResult.clarifications[0];
+        const qMsg: ChatMessage = {
+          id: `q-0-${Date.now()}`,
+          role: 'assistant',
+          type: 'clarification',
+          question: firstQ,
+          questionIndex: 0,
+          isAnswered: false,
+        };
+
+        setMessages((prev) => prev.filter((m) => m.type !== 'thinking').concat(qMsg));
       } else {
-        // No clarification needed: generate prompt directly
+        // Direct generation if no clarification needed
         const builtContext = buildPromptContext({
           originalInput: trimmed,
           analysis: analyzeResult.analysis,
@@ -217,25 +270,46 @@ export function StudioComposer({
         );
 
         inFlightRef.current = false;
+        setIsProcessing(false);
         if (controller.signal.aborted) return;
 
         if (genResult.ok) {
-          setSession({
+          const updatedSession = {
             ...contextSession,
-            status: 'complete',
+            status: 'complete' as const,
             title: genResult.title,
             variants: genResult.variants,
-          });
+          };
+          setSession(updatedSession);
+
+          const promptMsg: ChatMessage = {
+            id: `prompt-init-${Date.now()}`,
+            role: 'assistant',
+            type: 'prompt',
+            promptText: genResult.variants.balanced.prompt,
+            title: genResult.title,
+            isLatestPrompt: true,
+          };
+
+          setMessages((prev) => prev.filter((m) => m.type !== 'thinking').concat(promptMsg));
         } else {
-          setFailure(genResult.error);
-          setSession((curr) => (curr ? { ...curr, status: 'error' } : null));
+          setMessages((prev) =>
+            prev
+              .filter((m) => m.type !== 'thinking')
+              .concat({
+                id: `err-${Date.now()}`,
+                role: 'assistant',
+                type: 'error',
+                content: genResult.error.message || 'Generation failed. Please try again.',
+              }),
+          );
         }
       }
     },
     [categorySlug, templateId],
   );
 
-  // Auto-start if initialIdea was provided via query param
+  // Auto-start if initialIdea was provided
   useEffect(() => {
     if (initialIdea && !session && !inFlightRef.current) {
       handleStartNewSession(initialIdea);
@@ -243,7 +317,7 @@ export function StudioComposer({
   }, [initialIdea, session, handleStartNewSession]);
 
   /**
-   * User selects an option chip or types an answer to a clarification question
+   * User answers a clarification question
    */
   const handleAnswerQuestion = useCallback(
     async (answer: ClarificationAnswer) => {
@@ -256,23 +330,58 @@ export function StudioComposer({
 
       const totalQ = session.clarifications.length;
 
+      // 1. Mark active question message as answered
+      setMessages((prev) =>
+        prev.map((m) =>
+          m.type === 'clarification' && m.question.id === answer.questionId
+            ? { ...m, isAnswered: true, selectedAnswer: answer.value }
+            : m,
+        ),
+      );
+
+      // 2. Append user answer message
+      const userAnsMsg: ChatMessage = {
+        id: `user-ans-${Date.now()}`,
+        role: 'user',
+        type: 'user',
+        content: answer.value,
+      };
+
       if (currentQuestionIndex < totalQ - 1) {
+        const nextIdx = currentQuestionIndex + 1;
+        const nextQ = session.clarifications[nextIdx];
+
+        const nextQMsg: ChatMessage = {
+          id: `q-${nextIdx}-${Date.now()}`,
+          role: 'assistant',
+          type: 'clarification',
+          question: nextQ,
+          questionIndex: nextIdx,
+          isAnswered: false,
+        };
+
         setSession({
           ...session,
           clarificationAnswers: updatedAnswers,
         });
-        setCurrentQuestionIndex((prev) => prev + 1);
-        setIdeaInput('');
-      } else {
-        // All questions answered: build context and generate prompt
-        inFlightRef.current = true;
+        setCurrentQuestionIndex(nextIdx);
         setIdeaInput('');
 
-        const finalSession: PromptSession = {
-          ...session,
-          status: 'generating',
-          clarificationAnswers: updatedAnswers,
+        setMessages((prev) => [...prev, userAnsMsg, nextQMsg]);
+      } else {
+        // All questions answered -> generate final prompt
+        inFlightRef.current = true;
+        setIsProcessing(true);
+        setIdeaInput('');
+
+        const thinkingMsg: ChatMessage = {
+          id: `thinking-gen-${Date.now()}`,
+          role: 'assistant',
+          type: 'thinking',
+          content: 'Thinking...',
         };
+
+        setMessages((prev) => [...prev, userAnsMsg, thinkingMsg]);
 
         if (!session.analysis) return;
 
@@ -286,11 +395,11 @@ export function StudioComposer({
         });
 
         const generatingSession: PromptSession = {
-          ...finalSession,
+          ...session,
           status: 'generating',
+          clarificationAnswers: updatedAnswers,
           context: builtContext,
         };
-
         setSession(generatingSession);
 
         abortRef.current?.abort();
@@ -303,29 +412,167 @@ export function StudioComposer({
         );
 
         inFlightRef.current = false;
+        setIsProcessing(false);
         if (controller.signal.aborted) return;
 
         if (genResult.ok) {
-          setSession({
+          const completedSession = {
             ...generatingSession,
-            status: 'complete',
+            status: 'complete' as const,
             title: genResult.title,
             variants: genResult.variants,
-          });
+          };
+          setSession(completedSession);
+
+          const promptMsg: ChatMessage = {
+            id: `prompt-final-${Date.now()}`,
+            role: 'assistant',
+            type: 'prompt',
+            promptText: genResult.variants.balanced.prompt,
+            title: genResult.title,
+            isLatestPrompt: true,
+          };
+
+          setMessages((prev) => prev.filter((m) => m.type !== 'thinking').concat(promptMsg));
         } else {
-          setFailure(genResult.error);
-          setSession((curr) => (curr ? { ...curr, status: 'error' } : null));
+          setMessages((prev) =>
+            prev
+              .filter((m) => m.type !== 'thinking')
+              .concat({
+                id: `err-${Date.now()}`,
+                role: 'assistant',
+                type: 'error',
+                content: genResult.error.message || 'Generation failed. Please try again.',
+              }),
+          );
         }
       }
     },
     [currentQuestionIndex, session],
   );
 
+  /**
+   * Handle Refinement request (Make it short / Make it more detailed / Creative)
+   */
+  const handleRefine = useCallback(
+    async (mode: 'shorter' | 'detailed' | 'creative') => {
+      if (!session || !session.context || inFlightRef.current) return;
+
+      // Find current latest prompt text
+      const latestPromptMsg = [...messages].reverse().find((m) => m.type === 'prompt') as
+        | (ChatMessage & { type: 'prompt' })
+        | undefined;
+
+      const currentPromptText = latestPromptMsg?.promptText;
+      if (!currentPromptText) return;
+
+      const modeLabels: Record<'shorter' | 'detailed' | 'creative', string> = {
+        shorter: 'Make it short',
+        detailed: 'Make it more detailed',
+        creative: 'Creative',
+      };
+
+      const userLabel = modeLabels[mode];
+      inFlightRef.current = true;
+      setIsProcessing(true);
+
+      // Mark previous prompt as not latest
+      setMessages((prev) =>
+        prev.map((m) => (m.type === 'prompt' ? { ...m, isLatestPrompt: false } : m)),
+      );
+
+      const userRefineMsg: ChatMessage = {
+        id: `user-refine-${Date.now()}`,
+        role: 'user',
+        type: 'user',
+        content: userLabel,
+      };
+
+      const thinkingMsg: ChatMessage = {
+        id: `thinking-refine-${Date.now()}`,
+        role: 'assistant',
+        type: 'thinking',
+        content: 'Thinking...',
+      };
+
+      setMessages((prev) => [...prev, userRefineMsg, thinkingMsg]);
+
+      abortRef.current?.abort();
+      const controller = new AbortController();
+      abortRef.current = controller;
+
+      const res = await requestPromptRefinement(
+        {
+          prompt: currentPromptText,
+          context: session.context,
+          mode,
+        },
+        controller.signal,
+      );
+
+      inFlightRef.current = false;
+      setIsProcessing(false);
+      if (controller.signal.aborted) return;
+
+      if (res.ok) {
+        const refinedPromptMsg: ChatMessage = {
+          id: `prompt-refine-${Date.now()}`,
+          role: 'assistant',
+          type: 'prompt',
+          promptText: res.refinedPrompt,
+          title: session.title || 'Refined Prompt',
+          isLatestPrompt: true,
+          savedPromptId: session.savedPromptId,
+        };
+
+        setMessages((prev) => prev.filter((m) => m.type !== 'thinking').concat(refinedPromptMsg));
+      } else {
+        setMessages((prev) =>
+          prev
+            .filter((m) => m.type !== 'thinking')
+            .concat({
+              id: `err-${Date.now()}`,
+              role: 'assistant',
+              type: 'error',
+              content: "I couldn't refine that prompt. Please try again.",
+            }),
+        );
+      }
+    },
+    [messages, session],
+  );
+
+  /**
+   * Save prompt callback
+   */
+  const handleSavePrompt = useCallback(
+    async (promptText: string): Promise<string | undefined> => {
+      if (!session || !session.context) return undefined;
+      const res = await requestSavePrompt({
+        id: session.savedPromptId,
+        title: session.title || 'Generated Prompt',
+        originalInput: session.originalInput,
+        category: session.context.category,
+        context: session.context,
+        balancedPrompt: promptText,
+        detailedPrompt: promptText,
+        expertPrompt: promptText,
+      });
+
+      if (res.ok) {
+        setSession((curr) => (curr ? { ...curr, savedPromptId: res.prompt.id } : null));
+        return res.prompt.id;
+      }
+      return undefined;
+    },
+    [session],
+  );
+
   const handleFormSubmit = (e?: React.FormEvent) => {
     if (e) e.preventDefault();
     if (isBlankIdea(ideaInput)) return;
 
-    if (!session || session.status === 'error' || session.status === 'complete') {
+    if (!session || session.status === 'error' || messages.length === 0) {
       void handleStartNewSession(ideaInput);
     } else if (session.status === 'clarifying' && session.clarifications) {
       const activeQ = session.clarifications[currentQuestionIndex];
@@ -348,205 +595,152 @@ export function StudioComposer({
     }
   };
 
-  const currentQuestions = session?.clarifications ?? [];
-  const activeQuestion: ClarificationQuestion | undefined = currentQuestions[currentQuestionIndex];
-
   return (
-    <div className="relative flex flex-col min-h-full max-w-3xl mx-auto px-4 pt-14 lg:pt-6 pb-32">
+    <div className="relative flex flex-col h-full bg-[#0B0B0C]">
       <StarField />
-      {/* Messages Stream */}
-      <div className="flex-1 space-y-6">
-        {/* Minimal Initial Empty Welcome State with Horizontal Astronomical Animation & Signature Text */}
-        {!session && (
-          <div className="flex flex-col sm:flex-row items-center justify-center gap-6 sm:gap-10 pt-20 sm:pt-32">
-            {/* Left Side: Large Astronomical Orbit Animation */}
-            <div className="shrink-0 flex items-center justify-center">
-              <SpaceOrbitAnimation size="xl" />
-            </div>
 
-            {/* Right Side: Signature Typography */}
-            <div className="flex flex-col text-center sm:text-left space-y-2">
-              <h1 className="text-4xl sm:text-5xl lg:text-6xl font-extrabold tracking-tight text-[#F2F2F2] leading-[0.92]">
-                <span className="block">Space</span>
-                <span className="block text-[#38BDF8]">Prompt.</span>
-              </h1>
-              <p className="text-xs sm:text-sm font-medium text-[#8E8E93] pt-1">
-                Turn ideas into better prompts.
-              </p>
-            </div>
-          </div>
-        )}
-
-        {/* Active Conversation Messages */}
-        {session && (
-          <div className="space-y-6">
-            {/* User Initial Input Message */}
-            <div className="flex items-start gap-3 justify-end">
-              <div className="max-w-xl rounded-2xl bg-[#1A1A1A] border border-[#262626] px-4 py-3 text-sm text-[#F2F2F2]">
-                <p className="whitespace-pre-wrap leading-relaxed">{session.originalInput}</p>
+      {/* Main Conversation Scrollable Area */}
+      <div className="flex-1 overflow-y-auto px-4 pt-14 lg:pt-6 pb-36">
+        <div className="max-w-3xl mx-auto space-y-6">
+          {/* Empty Welcome State */}
+          {messages.length === 0 && (
+            <div className="flex flex-col sm:flex-row items-center justify-center gap-6 sm:gap-10 pt-20 sm:pt-32">
+              <div className="shrink-0 flex items-center justify-center">
+                <SpaceOrbitAnimation size="xl" />
               </div>
-              <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-[#242424] text-[#8E8E93] text-xs">
-                <User className="h-3.5 w-3.5" />
+              <div className="flex flex-col text-center sm:text-left space-y-2">
+                <h1 className="text-4xl sm:text-5xl lg:text-6xl font-extrabold tracking-tight text-[#F4F4F5] leading-[0.92]">
+                  <span className="block">Space</span>
+                  <span className="block text-[#38BDF8]">Prompt.</span>
+                </h1>
+                <p className="text-xs sm:text-sm font-medium text-[#A1A1AA] pt-1">
+                  Turn ideas into better prompts.
+                </p>
               </div>
             </div>
+          )}
 
-            {/* Assistant Analyzing Message */}
-            {session.status === 'analyzing' && (
-              <motion.div variants={fadeIn} initial="hidden" animate="visible">
-                <ThinkingIndicator
-                  phases={[
-                    'Thinking...',
-                    'Analyzing intent & domain...',
-                    'Formulating smart clarification questions...',
-                  ]}
-                />
-              </motion.div>
-            )}
+          {/* Active Conversation Messages Stream */}
+          {messages.map((msg) => {
+            if (msg.role === 'user') {
+              return (
+                <div key={msg.id} className="flex items-start gap-3 justify-end my-2">
+                  <div className="max-w-xl rounded-2xl bg-[#181819] border border-[#29292B] px-4 py-3 text-sm text-[#F4F4F5]">
+                    <p className="whitespace-pre-wrap leading-relaxed">{msg.content}</p>
+                  </div>
+                  <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-[#29292B] text-[#A1A1AA] text-xs mt-0.5">
+                    <User className="h-3.5 w-3.5" />
+                  </div>
+                </div>
+              );
+            }
 
-            {/* Assistant Clarification Flow (One Question at a time with option chips) */}
-            {session.status === 'clarifying' && (
-              <div className="space-y-4">
-                {/* Answered Clarifications History */}
-                {session.clarifications &&
-                  session.clarifications.slice(0, currentQuestionIndex).map((q) => {
-                    const ans = session.clarificationAnswers?.[q.id];
-                    return (
-                      <div key={q.id} className="space-y-4">
-                        <div className="flex items-start gap-3">
-                          <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-[#1A1A1A] border border-[#262626] text-[#38BDF8]">
-                            <Bot className="h-3.5 w-3.5" />
-                          </div>
-                          <div className="rounded-2xl bg-[#141414] border border-[#262626] px-4 py-3 text-sm text-[#F2F2F2]">
-                            <p>{q.question}</p>
-                          </div>
-                        </div>
+            if (msg.type === 'thinking') {
+              return <ThinkingIndicator key={msg.id} label="Thinking..." />;
+            }
 
-                        {ans && (
-                          <div className="flex items-start gap-3 justify-end">
-                            <div className="rounded-2xl bg-[#1A1A1A] border border-[#262626] px-4 py-2.5 text-sm text-[#F2F2F2]">
-                              <span>{ans.value}</span>
-                            </div>
-                            <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-[#242424] text-[#8E8E93] text-xs">
-                              <User className="h-3.5 w-3.5" />
-                            </div>
-                          </div>
-                        )}
-                      </div>
-                    );
-                  })}
+            if (msg.type === 'error') {
+              return (
+                <div key={msg.id} className="flex items-start gap-3 my-2">
+                  <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-[#181819] border border-red-500/30 text-red-400 mt-1">
+                    <Bot className="h-3.5 w-3.5" />
+                  </div>
+                  <div className="rounded-2xl bg-[#181819] border border-red-500/30 px-4 py-3 text-xs text-red-300 max-w-xl">
+                    <p>{msg.content}</p>
+                  </div>
+                </div>
+              );
+            }
 
-                {/* Active Question Message + Option Chips */}
-                {activeQuestion ? (
-                  <motion.div
-                    key={activeQuestion.id}
-                    variants={fadeUp}
-                    initial="hidden"
-                    animate="visible"
-                    className="flex items-start gap-3"
-                  >
-                    <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-[#1A1A1A] border border-[#262626] text-[#38BDF8] mt-1">
-                      <Bot className="h-3.5 w-3.5" />
+            if (msg.type === 'clarification') {
+              const q = msg.question;
+              return (
+                <motion.div
+                  key={msg.id}
+                  variants={fadeUp}
+                  initial="hidden"
+                  animate="visible"
+                  className="flex items-start gap-3 my-2"
+                >
+                  <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-[#181819] border border-[#29292B] text-[#38BDF8] mt-1">
+                    <Bot className="h-3.5 w-3.5" />
+                  </div>
+
+                  <div className="flex-1 space-y-3">
+                    <div className="rounded-2xl bg-[#181819] border border-[#29292B] p-4 text-sm text-[#F4F4F5] space-y-1">
+                      <p className="font-medium">{q.question}</p>
+                      {q.description && (
+                        <p className="text-xs text-[#A1A1AA]">{q.description}</p>
+                      )}
                     </div>
 
-                    <div className="flex-1 space-y-3">
-                      <div className="rounded-2xl bg-[#141414] border border-[#262626] p-4 text-sm text-[#F2F2F2] space-y-1">
-                        <p className="font-medium">{activeQuestion.question}</p>
-                        {activeQuestion.description && (
-                          <p className="text-xs text-[#8E8E93]">{activeQuestion.description}</p>
-                        )}
-                      </div>
-
-                      {/* Selectable Option Chips under Assistant Message */}
+                    {/* Show Option Chips ONLY if question is active and not yet answered */}
+                    {!msg.isAnswered && (
                       <div className="flex flex-wrap gap-2 pt-1">
-                        {activeQuestion.options.map((opt) => (
+                        {q.options.map((opt) => (
                           <button
                             key={opt.id}
                             type="button"
                             onClick={() =>
                               handleAnswerQuestion({
-                                questionId: activeQuestion.id,
+                                questionId: q.id,
                                 selectedOptionId: opt.id,
                                 value: opt.value,
                                 custom: opt.type === 'custom',
                                 delegatedToAI: opt.type === 'ai-recommend',
                               })
                             }
-                            className="px-3 py-1.5 rounded-xl text-xs font-medium border border-[#262626] bg-[#1A1A1A] text-[#F2F2F2] hover:border-[#38BDF8] hover:bg-[#242424] transition-all text-left"
+                            className="px-3 py-1.5 rounded-xl text-xs font-medium border border-[#29292B] bg-[#181819] text-[#F4F4F5] hover:border-[#38BDF8]/60 hover:bg-[#242424] transition-all cursor-pointer"
                           >
                             {opt.label}
                           </button>
                         ))}
                       </div>
-                    </div>
-                  </motion.div>
-                ) : (
-                  <motion.div variants={fadeIn} initial="hidden" animate="visible">
-                    <ThinkingIndicator
-                      phases={['Thinking...', 'Loading questions...']}
+                    )}
+                  </div>
+                </motion.div>
+              );
+            }
+
+            if (msg.type === 'prompt') {
+              return (
+                <motion.div
+                  key={msg.id}
+                  variants={fadeUp}
+                  initial="hidden"
+                  animate="visible"
+                  className="flex items-start gap-3 my-3"
+                >
+                  <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-[#181819] border border-[#29292B] text-[#38BDF8] mt-1">
+                    <Sparkles className="h-3.5 w-3.5" />
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <StudioResult
+                      promptText={msg.promptText}
+                      title={msg.title}
+                      savedPromptId={msg.savedPromptId}
+                      isLatestPrompt={msg.isLatestPrompt}
+                      onSave={handleSavePrompt}
+                      onRefine={handleRefine}
                     />
-                  </motion.div>
-                )}
-              </div>
-            )}
+                  </div>
+                </motion.div>
+              );
+            }
 
-            {/* Assistant Generating Message */}
-            {session.status === 'generating' && (
-              <motion.div variants={fadeIn} initial="hidden" animate="visible">
-                <ThinkingIndicator
-                  phases={[
-                    'Thinking...',
-                    'Synthesizing requirements into prompt context...',
-                    'Building Balanced, Detailed & Expert variants...',
-                  ]}
-                />
-              </motion.div>
-            )}
+            return null;
+          })}
 
-            {/* Assistant Final Generated Prompt Result */}
-            {session.status === 'complete' && session.variants && (
-              <motion.div
-                variants={fadeUp}
-                initial="hidden"
-                animate="visible"
-                className="flex items-start gap-3"
-              >
-                <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-[#1A1A1A] border border-[#262626] text-[#38BDF8] mt-1">
-                  <Sparkles className="h-3.5 w-3.5" />
-                </div>
-                <div className="flex-1 min-w-0">
-                  <StudioResult
-                    session={session}
-                    variants={session.variants}
-                    onRegenerate={() => handleStartNewSession(session.originalInput)}
-                    onBackToContext={() => {}}
-                    onStartOver={() => setSession(null)}
-                  />
-                </div>
-              </motion.div>
-            )}
-
-            {/* Error message */}
-            {session.status === 'error' && failure && (
-              <motion.div variants={fadeUp} initial="hidden" animate="visible">
-                <StudioError
-                  failure={failure}
-                  onRetry={() => handleStartNewSession(session.originalInput)}
-                  onEdit={() => setSession(null)}
-                />
-              </motion.div>
-            )}
-
-            <div ref={messagesEndRef} />
-          </div>
-        )}
+          <div ref={messagesEndRef} />
+        </div>
       </div>
 
-      {/* Fixed Centered Bottom Input Bar */}
-      <div className="fixed bottom-0 left-0 right-0 lg:left-[240px] p-3 sm:p-4 bg-[#0D0D0D] pointer-events-none z-30">
-        <div className="max-w-3xl mx-auto pointer-events-auto">
+      {/* Fixed Bottom Input Composer */}
+      <div className="fixed bottom-0 left-0 right-0 lg:left-[240px] p-3 sm:p-4 bg-[#0B0B0C]/80 backdrop-blur-md z-30">
+        <div className="max-w-3xl mx-auto">
           <form
             onSubmit={handleFormSubmit}
-            className="relative rounded-2xl border border-[#262626] bg-[#1A1A1A] p-3 space-y-2 focus-within:border-[#38BDF8]/60 transition-colors shadow-lg"
+            className="relative rounded-2xl border border-[#29292B] bg-[#1C1C1D] p-3 space-y-2 focus-within:border-[#38BDF8]/60 transition-colors shadow-lg"
           >
             <textarea
               ref={textareaRef}
@@ -563,14 +757,14 @@ export function StudioComposer({
                   ? 'Type custom response or select an option above...'
                   : 'Start with a rough idea...'
               }
-              className="w-full resize-none bg-transparent text-sm text-[#F2F2F2] placeholder-[#8E8E93] focus:outline-none px-1"
+              className="w-full resize-none bg-transparent text-sm text-[#F4F4F5] placeholder-[#71717A] focus:outline-none px-1"
             />
 
             {validationError && (
               <p className="text-xs text-red-400 px-1 font-medium">{validationError}</p>
             )}
 
-            <div className="flex items-center justify-between pt-1 border-t border-[#262626]">
+            <div className="flex items-center justify-between pt-1 border-t border-[#29292B]">
               <div className="flex items-center gap-2">
                 <VoiceStatus
                   status={speechStatus}
@@ -580,14 +774,14 @@ export function StudioComposer({
               </div>
 
               <div className="flex items-center gap-2">
-                <span className="text-[11px] text-[#636366] hidden sm:inline">
+                <span className="text-[11px] text-[#71717A] hidden sm:inline">
                   Enter to send
                 </span>
                 <VoiceButton status={speechStatus} onToggle={toggleListening} />
                 <button
                   type="submit"
-                  disabled={isBlankIdea(ideaInput) || session?.status === 'analyzing' || session?.status === 'generating'}
-                  className="h-8 w-8 flex items-center justify-center rounded-xl bg-[#38BDF8] text-slate-950 hover:bg-[#0284C7] disabled:opacity-30 disabled:cursor-not-allowed transition-all shrink-0"
+                  disabled={isBlankIdea(ideaInput) || isProcessing}
+                  className="h-8 w-8 flex items-center justify-center rounded-xl bg-[#38BDF8] text-slate-950 hover:bg-[#0284C7] disabled:opacity-30 disabled:cursor-not-allowed transition-all shrink-0 cursor-pointer"
                   aria-label="Send message"
                 >
                   <Send className="h-3.5 w-3.5" />

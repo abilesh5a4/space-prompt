@@ -20,7 +20,7 @@ export default async function AppLayout({ children }: { children: React.ReactNod
     <div className="flex h-dvh overflow-hidden bg-[#0D0D0D] text-[#F2F2F2]">
       <AppSidebar user={displayUser} />
 
-      <main className="flex-1 min-w-0 h-full overflow-y-auto relative bg-[#0D0D0D]">
+      <main className="flex-1 min-w-0 h-full overflow-hidden relative bg-[#0B0B0C]">
         {children}
       </main>
     </div>
