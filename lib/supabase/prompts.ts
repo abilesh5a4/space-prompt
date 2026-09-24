@@ -222,3 +222,24 @@ export async function toggleFavorite(id: string, isFavorite: boolean): Promise<S
 
   return mapRowToSavedPrompt(data as DbPromptRow);
 }
+
+/**
+ * Deletes ALL prompts for the current user.
+ */
+export async function clearAllPrompts(): Promise<boolean> {
+  const supabase = await createServerClient();
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+
+  if (!user) return false;
+
+  const { error } = await supabase
+    .from('prompts')
+    .delete()
+    .eq('user_id', user.id);
+
+  return !error;
+}
+
+

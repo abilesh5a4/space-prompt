@@ -85,3 +85,50 @@ export async function requestDeletePrompt(id: string): Promise<{ ok: true } | { 
     return { ok: false, error: 'Network error while deleting prompt' };
   }
 }
+
+export async function requestFetchPrompts(): Promise<{ ok: true; prompts: SavedPrompt[] } | { ok: false; error: string }> {
+  try {
+    const res = await fetch('/api/prompts');
+    const data = await res.json();
+    if (!res.ok || !Array.isArray(data.prompts)) {
+      return { ok: false, error: data?.error?.message ?? 'Failed to fetch prompts' };
+    }
+
+    return { ok: true, prompts: data.prompts };
+  } catch {
+    return { ok: false, error: 'Network error while fetching prompts' };
+  }
+}
+
+export async function requestClearPrompts(): Promise<{ ok: true } | { ok: false; error: string }> {
+  try {
+    const res = await fetch('/api/prompts', {
+      method: 'DELETE',
+    });
+
+    const data = await res.json();
+    if (!res.ok) {
+      return { ok: false, error: data?.error?.message ?? 'Failed to clear prompts' };
+    }
+
+    return { ok: true };
+  } catch {
+    return { ok: false, error: 'Network error while clearing prompts' };
+  }
+}
+
+export async function requestFetchPromptById(id: string): Promise<{ ok: true; prompt: SavedPrompt } | { ok: false; error: string }> {
+  try {
+    const res = await fetch(`/api/prompts/${id}`);
+    const data = await res.json();
+    if (!res.ok || !data.prompt) {
+      return { ok: false, error: data?.error?.message ?? 'Prompt not found' };
+    }
+
+    return { ok: true, prompt: data.prompt };
+  } catch {
+    return { ok: false, error: 'Network error while fetching prompt' };
+  }
+}
+
+

@@ -1,12 +1,13 @@
 import { analyzeErrorMessages } from '@/lib/analyze-messages';
 import { isSupabaseConfigured } from '@/lib/supabase';
-import { getPrompts, savePrompt } from '@/lib/supabase/prompts';
+import { clearAllPrompts, getPrompts, savePrompt } from '@/lib/supabase/prompts';
 import { createServerClient } from '@/lib/supabase/server';
 import type { SavedPrompt } from '@/types';
 
 /**
  * GET /api/prompts — Returns saved prompts for current user.
  * POST /api/prompts — Creates or updates a saved prompt for current user.
+ * DELETE /api/prompts — Deletes all saved prompts for current user.
  */
 
 export async function GET(): Promise<Response> {
@@ -81,3 +82,24 @@ export async function POST(request: Request): Promise<Response> {
     return Response.json({ error: { code: 'ANALYSIS_FAILED', message: 'Failed to save prompt' } }, { status: 500 });
   }
 }
+
+export async function DELETE(): Promise<Response> {
+  if (!isSupabaseConfigured()) {
+    return Response.json({ error: { code: 'UNAUTHENTICATED', message: analyzeErrorMessages.UNAUTHENTICATED } }, { status: 401 });
+  }
+
+  const supabase = await createServerClient();
+  const { data: { user } } = await supabase.auth.getUser();
+
+  if (!user) {
+    return Response.json({ error: { code: 'UNAUTHENTICATED', message: 'Authentication required' } }, { status: 401 });
+  }
+
+  const success = await clearAllPrompts();
+  if (!success) {
+    return Response.json({ error: { code: 'ANALYSIS_FAILED', message: 'Failed to clear prompts' } }, { status: 500 });
+  }
+
+  return Response.json({ success: true }, { status: 200 });
+}
+

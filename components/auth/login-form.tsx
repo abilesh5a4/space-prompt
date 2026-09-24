@@ -1,78 +1,48 @@
 'use client';
 
 import React, { useState } from 'react';
-import Link from 'next/link';
-import { useRouter, useSearchParams } from 'next/navigation';
 import { createBrowserClient } from '@/lib/supabase/client';
-import { Input } from '@/components/ui/input';
-import { Button } from '@/components/ui/button';
-import { OAuthButtons } from '@/components/auth/oauth-buttons';
-import { AuthDivider } from '@/components/auth/auth-divider';
-import { Eye, EyeOff, AlertCircle } from 'lucide-react';
 import { isSupabaseConfigured } from '@/lib/supabase';
+import { AlertCircle } from 'lucide-react';
 
 export function LoginForm() {
-  const router = useRouter();
-  const searchParams = useSearchParams();
-  const returnUrl = searchParams.get('returnUrl') || '/dashboard';
-
-  const [email, setEmail] = useState('');
-  const [password, setPassword] = useState('');
-  const [showPassword, setShowPassword] = useState(false);
-
   const [isLoading, setIsLoading] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
-  const handleLogin = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setErrorMessage(null);
-
-    if (!email || !email.includes('@')) {
-      setErrorMessage('Please enter a valid email address.');
-      return;
-    }
-
-    if (!password) {
-      setErrorMessage('Please enter your password.');
-      return;
-    }
-
-    if (!isSupabaseConfigured()) {
-      setErrorMessage('Supabase environment variables are missing. Please check SUPABASE_SETUP.md.');
-      return;
-    }
-
+  const handleGoogleLogin = async () => {
     try {
       setIsLoading(true);
-      const supabase = createBrowserClient();
+      setErrorMessage(null);
 
-      const { error } = await supabase.auth.signInWithPassword({
-        email,
-        password,
-      });
-
-      if (error) {
-        if (error.message.includes('Invalid login credentials')) {
-          setErrorMessage('Invalid email or password. Please try again.');
-        } else {
-          setErrorMessage(error.message);
-        }
+      if (!isSupabaseConfigured()) {
+        setErrorMessage('Supabase environment variables are missing or unconfigured.');
         setIsLoading(false);
         return;
       }
 
-      router.push(returnUrl);
-      router.refresh();
+      const supabase = createBrowserClient();
+      const origin = typeof window !== 'undefined' ? window.location.origin : '';
+
+      const { error } = await supabase.auth.signInWithOAuth({
+        provider: 'google',
+        options: {
+          redirectTo: `${origin}/auth/callback`,
+        },
+      });
+
+      if (error) {
+        setErrorMessage(error.message);
+        setIsLoading(false);
+      }
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : 'An unexpected error occurred during login.';
-      setErrorMessage(msg);
+      const message = err instanceof Error ? err.message : 'An unexpected error occurred.';
+      setErrorMessage(message);
       setIsLoading(false);
     }
   };
 
   return (
-    <div className="space-y-5">
-      {/* Error Alert */}
+    <div className="space-y-4">
       {errorMessage && (
         <div className="p-3.5 rounded-xl bg-red-500/10 border border-red-500/30 flex items-start gap-2.5 text-xs text-red-300">
           <AlertCircle className="w-4 h-4 text-red-400 shrink-0 mt-0.5" />
@@ -80,82 +50,32 @@ export function LoginForm() {
         </div>
       )}
 
-      {/* OAuth Buttons */}
-      <OAuthButtons onError={(msg) => setErrorMessage(msg)} />
-
-      {/* Divider */}
-      <AuthDivider />
-
-      {/* Email/Password Form */}
-      <form onSubmit={handleLogin} className="space-y-4 text-left">
-        <div className="space-y-1">
-          <label className="text-xs font-semibold text-slate-300">Email Address</label>
-          <Input
-            type="email"
-            placeholder="you@example.com"
-            value={email}
-            onChange={(e) => setEmail(e.target.value)}
-            disabled={isLoading}
-            required
-            autoComplete="email"
+      <button
+        type="button"
+        disabled={isLoading}
+        onClick={handleGoogleLogin}
+        className="w-full flex items-center justify-center gap-3 px-4 py-3 rounded-2xl bg-[#181819] hover:bg-[#242424] border border-[#29292B] text-[15px] font-semibold text-[#F4F4F5] transition-all cursor-pointer shadow-xs disabled:opacity-50"
+      >
+        <svg className="w-5 h-5 shrink-0" viewBox="0 0 24 24">
+          <path
+            fill="#EA4335"
+            d="M12 5c1.6 0 3 .6 4.1 1.6l3.1-3.1C17.3 1.7 14.8 1 12 1 7.4 1 3.5 3.6 1.6 7.4l3.7 2.9C6.2 7.2 8.8 5 12 5z"
           />
-        </div>
-
-        <div className="space-y-1">
-          <div className="flex items-center justify-between">
-            <label className="text-xs font-semibold text-slate-300">Password</label>
-            <Link 
-              href="/forgot-password" 
-              className="text-[11px] font-medium text-emerald-400 hover:underline"
-            >
-              Forgot password?
-            </Link>
-          </div>
-
-          <div className="relative">
-            <Input
-              type={showPassword ? 'text' : 'password'}
-              placeholder="••••••••"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              disabled={isLoading}
-              required
-              autoComplete="current-password"
-              className="pr-10"
-            />
-            <button
-              type="button"
-              onClick={() => setShowPassword(!showPassword)}
-              aria-label={showPassword ? 'Hide password' : 'Show password'}
-              className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-200 transition-colors p-1"
-            >
-              {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-            </button>
-          </div>
-        </div>
-
-        <Button
-          type="submit"
-          variant="primary"
-          size="md"
-          isLoading={isLoading}
-          className="w-full mt-2 font-bold"
-        >
-          <span>Sign In</span>
-        </Button>
-      </form>
-
-      {/* Footer Link */}
-      <div className="pt-2 text-center text-xs text-slate-400">
-        Don&apos;t have an account?{' '}
-        <Link
-          href={returnUrl !== '/dashboard' ? `/signup?returnUrl=${encodeURIComponent(returnUrl)}` : '/signup'}
-          className="text-emerald-400 font-semibold hover:underline"
-        >
-          Create one
-        </Link>
-      </div>
+          <path
+            fill="#4285F4"
+            d="M23.5 12.3c0-.8-.1-1.6-.2-2.3H12v4.5h6.5c-.3 1.5-1.1 2.8-2.4 3.7l3.7 2.9c2.2-2 3.7-5 3.7-8.8z"
+          />
+          <path
+            fill="#FBBC05"
+            d="M5.3 14.8c-.3-.8-.4-1.8-.4-2.8s.1-2 .4-2.8L1.6 6.3C.6 8.3 0 10.1 0 12s.6 3.7 1.6 5.7l3.7-2.9z"
+          />
+          <path
+            fill="#34A853"
+            d="M12 23c3.2 0 6-1.1 8-3l-3.7-2.9c-1.1.7-2.5 1.2-4.3 1.2-3.2 0-5.8-2.2-6.7-5.3L1.6 16c1.9 3.8 5.8 7 10.4 7z"
+          />
+        </svg>
+        <span>{isLoading ? 'Connecting to Google...' : 'Continue with Google'}</span>
+      </button>
     </div>
   );
 }
-

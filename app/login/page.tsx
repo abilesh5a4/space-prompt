@@ -10,21 +10,12 @@ export const metadata: Metadata = {
 };
 
 function LoginFormFallback() {
-  return (
-    <div className="space-y-4">
-      <Skeleton className="h-10 w-full" />
-      <Skeleton className="h-10 w-full" />
-      <Skeleton className="h-11 w-full" />
-    </div>
-  );
+  return <Skeleton className="h-12 w-full rounded-2xl" />;
 }
 
 export default function LoginPage() {
   return (
-    <AuthShell
-      title="Welcome back."
-      subtitle="Sign in to continue building better prompts."
-    >
+    <AuthShell>
       <Suspense fallback={<LoginFormFallback />}>
         <LoginForm />
       </Suspense>

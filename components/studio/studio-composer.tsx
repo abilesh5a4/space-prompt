@@ -2,9 +2,10 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { motion } from 'framer-motion';
-import { Send, Bot, User, Sparkles } from 'lucide-react';
+import { Send, User } from 'lucide-react';
 import { VoiceButton, VoiceStatus } from '@/components/studio/voice-button';
 import { StudioResult } from '@/components/studio/studio-result';
+import { AssistantMark } from '@/components/ui/assistant-mark';
 import { SpaceOrbitAnimation } from '@/components/ui/space-orbit-animation';
 import { StarField } from '@/components/ui/star-field';
 import { useSpeechRecognition } from '@/hooks/use-speech-recognition';
@@ -13,7 +14,7 @@ import { requestClarifications } from '@/lib/clarify-client';
 import { buildPromptContext } from '@/lib/context/build-prompt-context';
 import { requestPromptGeneration } from '@/lib/generate-client';
 import { requestPromptRefinement } from '@/lib/refine-client';
-import { requestSavePrompt } from '@/lib/prompts-client';
+import { requestSavePrompt, requestFetchPromptById } from '@/lib/prompts-client';
 import { fadeUp } from '@/lib/motion';
 import {
   appendTranscript,
@@ -29,6 +30,7 @@ export interface StudioComposerProps {
   initialIdea?: string;
   templateId?: string | null;
   categorySlug?: string | null;
+  promptId?: string | null;
 }
 
 export type ChatMessage =
@@ -54,19 +56,17 @@ export type ChatMessage =
     }
   | { id: string; role: 'assistant'; type: 'error'; content: string };
 
-function ThinkingIndicator({ label = 'Thinking...' }: { label?: string }) {
+function ThinkingIndicator({ label = 'Thinking' }: { label?: string }) {
   return (
-    <div className="flex items-start gap-3 my-2">
-      <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-[#181819] border border-[#29292B] text-[#38BDF8]">
-        <Bot className="h-3.5 w-3.5" />
-      </div>
-      <div className="rounded-2xl bg-[#181819] border border-[#29292B] px-4 py-2.5 text-xs text-[#A1A1AA] flex items-center gap-2.5 shadow-xs">
+    <div className="flex items-center gap-3 my-2">
+      <AssistantMark size="md" />
+      <div className="flex items-center gap-2 text-[14px] font-medium text-[#A1A1AA]">
+        <span>{label}</span>
         <span className="flex items-center gap-1 shrink-0">
           <span className="h-1.5 w-1.5 rounded-full bg-[#38BDF8] animate-pulse" />
           <span className="h-1.5 w-1.5 rounded-full bg-[#38BDF8] animate-pulse [animation-delay:0.2s]" />
           <span className="h-1.5 w-1.5 rounded-full bg-[#38BDF8] animate-pulse [animation-delay:0.4s]" />
         </span>
-        <span className="text-xs font-medium text-[#F4F4F5]">Space Prompt {label}</span>
       </div>
     </div>
   );
@@ -76,6 +76,7 @@ export function StudioComposer({
   initialIdea = '',
   templateId = null,
   categorySlug = null,
+  promptId = null,
 }: StudioComposerProps) {
   const [ideaInput, setIdeaInput] = useState(() => clampIdea(initialIdea));
   const [session, setSession] = useState<PromptSession | null>(null);
@@ -106,6 +107,47 @@ export function StudioComposer({
     return () => abortRef.current?.abort();
   }, []);
 
+  // Load existing prompt by promptId if provided
+  useEffect(() => {
+    if (promptId && messages.length === 0 && !inFlightRef.current) {
+      void (async () => {
+        setIsProcessing(true);
+        const res = await requestFetchPromptById(promptId);
+        setIsProcessing(false);
+        if (res.ok) {
+          const loadedSession = createPromptSession({
+            originalInput: res.prompt.originalInput,
+            status: 'complete',
+          });
+          setSession({
+            ...loadedSession,
+            savedPromptId: res.prompt.id,
+            title: res.prompt.title,
+            context: res.prompt.context,
+          });
+
+          setMessages([
+            {
+              id: `user-saved-${res.prompt.id}`,
+              role: 'user',
+              type: 'user',
+              content: res.prompt.originalInput,
+            },
+            {
+              id: `prompt-saved-${res.prompt.id}`,
+              role: 'assistant',
+              type: 'prompt',
+              promptText: res.prompt.balancedPrompt,
+              title: res.prompt.title,
+              savedPromptId: res.prompt.id,
+              isLatestPrompt: true,
+            },
+          ]);
+        }
+      })();
+    }
+  }, [promptId, messages.length]);
+
   /**
    * Start a new chat session from user initial input
    */
@@ -134,7 +176,7 @@ export function StudioComposer({
         id: `thinking-init-${Date.now()}`,
         role: 'assistant',
         type: 'thinking',
-        content: 'Thinking...',
+        content: 'Thinking',
       };
 
       setMessages([userMsg, thinkingMsg]);
@@ -264,6 +306,11 @@ export function StudioComposer({
         };
         setSession(contextSession);
 
+        // Update thinking label to 'Writing prompt'
+        setMessages((prev) =>
+          prev.map((m) => (m.type === 'thinking' ? { ...m, content: 'Writing prompt' } : m)),
+        );
+
         const genResult = await requestPromptGeneration(
           { context: builtContext },
           controller.signal,
@@ -292,6 +339,7 @@ export function StudioComposer({
           };
 
           setMessages((prev) => prev.filter((m) => m.type !== 'thinking').concat(promptMsg));
+          window.dispatchEvent(new CustomEvent('spaceprompt:recents-updated'));
         } else {
           setMessages((prev) =>
             prev
@@ -311,10 +359,10 @@ export function StudioComposer({
 
   // Auto-start if initialIdea was provided
   useEffect(() => {
-    if (initialIdea && !session && !inFlightRef.current) {
+    if (initialIdea && !session && !inFlightRef.current && !promptId) {
       handleStartNewSession(initialIdea);
     }
-  }, [initialIdea, session, handleStartNewSession]);
+  }, [initialIdea, session, handleStartNewSession, promptId]);
 
   /**
    * User answers a clarification question
@@ -378,7 +426,7 @@ export function StudioComposer({
           id: `thinking-gen-${Date.now()}`,
           role: 'assistant',
           type: 'thinking',
-          content: 'Thinking...',
+          content: 'Writing prompt',
         };
 
         setMessages((prev) => [...prev, userAnsMsg, thinkingMsg]);
@@ -434,6 +482,7 @@ export function StudioComposer({
           };
 
           setMessages((prev) => prev.filter((m) => m.type !== 'thinking').concat(promptMsg));
+          window.dispatchEvent(new CustomEvent('spaceprompt:recents-updated'));
         } else {
           setMessages((prev) =>
             prev
@@ -452,13 +501,12 @@ export function StudioComposer({
   );
 
   /**
-   * Handle Refinement request (Make it short / Make it more detailed / Creative)
+   * Handle Refinement request
    */
   const handleRefine = useCallback(
     async (mode: 'shorter' | 'detailed' | 'creative') => {
       if (!session || !session.context || inFlightRef.current) return;
 
-      // Find current latest prompt text
       const latestPromptMsg = [...messages].reverse().find((m) => m.type === 'prompt') as
         | (ChatMessage & { type: 'prompt' })
         | undefined;
@@ -476,7 +524,6 @@ export function StudioComposer({
       inFlightRef.current = true;
       setIsProcessing(true);
 
-      // Mark previous prompt as not latest
       setMessages((prev) =>
         prev.map((m) => (m.type === 'prompt' ? { ...m, isLatestPrompt: false } : m)),
       );
@@ -492,7 +539,7 @@ export function StudioComposer({
         id: `thinking-refine-${Date.now()}`,
         role: 'assistant',
         type: 'thinking',
-        content: 'Thinking...',
+        content: 'Writing prompt',
       };
 
       setMessages((prev) => [...prev, userRefineMsg, thinkingMsg]);
@@ -526,6 +573,7 @@ export function StudioComposer({
         };
 
         setMessages((prev) => prev.filter((m) => m.type !== 'thinking').concat(refinedPromptMsg));
+        window.dispatchEvent(new CustomEvent('spaceprompt:recents-updated'));
       } else {
         setMessages((prev) =>
           prev
@@ -561,6 +609,7 @@ export function StudioComposer({
 
       if (res.ok) {
         setSession((curr) => (curr ? { ...curr, savedPromptId: res.prompt.id } : null));
+        window.dispatchEvent(new CustomEvent('spaceprompt:recents-updated'));
         return res.prompt.id;
       }
       return undefined;
@@ -600,11 +649,11 @@ export function StudioComposer({
       <StarField />
 
       {/* Main Conversation Scrollable Area */}
-      <div className="flex-1 overflow-y-auto px-4 pt-14 lg:pt-6 pb-36">
-        <div className="max-w-3xl mx-auto space-y-6">
+      <div className="flex-1 overflow-y-auto px-3 sm:px-4 pt-14 lg:pt-6 pb-36">
+        <div className="max-w-3xl mx-auto space-y-5">
           {/* Empty Welcome State */}
           {messages.length === 0 && (
-            <div className="flex flex-col sm:flex-row items-center justify-center gap-6 sm:gap-10 pt-20 sm:pt-32">
+            <div className="flex flex-col sm:flex-row items-center justify-center gap-6 sm:gap-10 pt-16 sm:pt-32">
               <div className="shrink-0 flex items-center justify-center">
                 <SpaceOrbitAnimation size="xl" />
               </div>
@@ -624,28 +673,26 @@ export function StudioComposer({
           {messages.map((msg) => {
             if (msg.role === 'user') {
               return (
-                <div key={msg.id} className="flex items-start gap-3 justify-end my-2">
-                  <div className="max-w-xl rounded-2xl bg-[#181819] border border-[#29292B] px-4 py-3 text-sm text-[#F4F4F5]">
+                <div key={msg.id} className="flex items-start gap-2.5 justify-end my-2">
+                  <div className="max-w-[82%] sm:max-w-xl rounded-2xl bg-[#181819] border border-[#29292B] px-4 py-3 text-[15px] text-[#F4F4F5] shadow-xs">
                     <p className="whitespace-pre-wrap leading-relaxed">{msg.content}</p>
                   </div>
-                  <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-[#29292B] text-[#A1A1AA] text-xs mt-0.5">
-                    <User className="h-3.5 w-3.5" />
+                  <div className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-[#29292B] text-[#A1A1AA] text-xs mt-1">
+                    <User className="h-3 w-3" />
                   </div>
                 </div>
               );
             }
 
             if (msg.type === 'thinking') {
-              return <ThinkingIndicator key={msg.id} label="Thinking..." />;
+              return <ThinkingIndicator key={msg.id} label={msg.content} />;
             }
 
             if (msg.type === 'error') {
               return (
                 <div key={msg.id} className="flex items-start gap-3 my-2">
-                  <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-[#181819] border border-red-500/30 text-red-400 mt-1">
-                    <Bot className="h-3.5 w-3.5" />
-                  </div>
-                  <div className="rounded-2xl bg-[#181819] border border-red-500/30 px-4 py-3 text-xs text-red-300 max-w-xl">
+                  <AssistantMark size="md" className="mt-1" />
+                  <div className="rounded-2xl bg-[#181819] border border-red-500/30 px-4 py-3 text-[14px] text-red-300 max-w-xl">
                     <p>{msg.content}</p>
                   </div>
                 </div>
@@ -662,19 +709,16 @@ export function StudioComposer({
                   animate="visible"
                   className="flex items-start gap-3 my-2"
                 >
-                  <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-[#181819] border border-[#29292B] text-[#38BDF8] mt-1">
-                    <Bot className="h-3.5 w-3.5" />
-                  </div>
+                  <AssistantMark size="md" className="mt-1" />
 
                   <div className="flex-1 space-y-3">
-                    <div className="rounded-2xl bg-[#181819] border border-[#29292B] p-4 text-sm text-[#F4F4F5] space-y-1">
+                    <div className="text-[15px] text-[#F4F4F5] leading-relaxed space-y-1">
                       <p className="font-medium">{q.question}</p>
                       {q.description && (
                         <p className="text-xs text-[#A1A1AA]">{q.description}</p>
                       )}
                     </div>
 
-                    {/* Show Option Chips ONLY if question is active and not yet answered */}
                     {!msg.isAnswered && (
                       <div className="flex flex-wrap gap-2 pt-1">
                         {q.options.map((opt) => (
@@ -690,7 +734,7 @@ export function StudioComposer({
                                 delegatedToAI: opt.type === 'ai-recommend',
                               })
                             }
-                            className="px-3 py-1.5 rounded-xl text-xs font-medium border border-[#29292B] bg-[#181819] text-[#F4F4F5] hover:border-[#38BDF8]/60 hover:bg-[#242424] transition-all cursor-pointer"
+                            className="px-3.5 py-1.5 rounded-xl text-[13px] sm:text-[14px] font-medium border border-[#29292B] bg-[#181819] text-[#F4F4F5] hover:border-[#38BDF8]/60 hover:bg-[#242424] transition-all cursor-pointer"
                           >
                             {opt.label}
                           </button>
@@ -711,9 +755,7 @@ export function StudioComposer({
                   animate="visible"
                   className="flex items-start gap-3 my-3"
                 >
-                  <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-[#181819] border border-[#29292B] text-[#38BDF8] mt-1">
-                    <Sparkles className="h-3.5 w-3.5" />
-                  </div>
+                  <AssistantMark size="md" className="mt-1" />
                   <div className="flex-1 min-w-0">
                     <StudioResult
                       promptText={msg.promptText}
@@ -736,7 +778,7 @@ export function StudioComposer({
       </div>
 
       {/* Fixed Bottom Input Composer */}
-      <div className="fixed bottom-0 left-0 right-0 lg:left-[240px] p-3 sm:p-4 bg-[#0B0B0C]/80 backdrop-blur-md z-30">
+      <div className="fixed bottom-0 left-0 right-0 lg:left-[240px] p-2.5 sm:p-4 bg-[#0B0B0C]/90 backdrop-blur-md z-30 pb-[max(0.75rem,env(safe-area-inset-bottom))]">
         <div className="max-w-3xl mx-auto">
           <form
             onSubmit={handleFormSubmit}
@@ -757,7 +799,7 @@ export function StudioComposer({
                   ? 'Type custom response or select an option above...'
                   : 'Start with a rough idea...'
               }
-              className="w-full resize-none bg-transparent text-sm text-[#F4F4F5] placeholder-[#71717A] focus:outline-none px-1"
+              className="w-full min-h-[44px] sm:min-h-[48px] resize-none bg-transparent text-[15px] sm:text-[16px] text-[#F4F4F5] placeholder-[#71717A] focus:outline-none px-1"
             />
 
             {validationError && (

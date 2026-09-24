@@ -18,6 +18,7 @@ interface StudioSearchParams {
   idea?: string | string[];
   category?: string | string[];
   template?: string | string[];
+  promptId?: string | string[];
 }
 
 export default async function StudioPage({
@@ -29,6 +30,7 @@ export default async function StudioPage({
 
   const template = findTemplate(firstValue(params.template));
   const category = findQuickCategory(firstValue(params.category));
+  const promptId = firstValue(params.promptId) ?? null;
 
   const idea = clampIdea(firstValue(params.idea) ?? '');
   const initialIdea = idea || template?.starterText || '';
@@ -39,10 +41,11 @@ export default async function StudioPage({
   return (
     <div className="h-full">
       <StudioComposer
-        key={`${templateId ?? ''}|${categorySlug ?? ''}|${initialIdea}`}
+        key={`${templateId ?? ''}|${categorySlug ?? ''}|${initialIdea}|${promptId ?? ''}`}
         initialIdea={initialIdea}
         templateId={templateId}
         categorySlug={categorySlug}
+        promptId={promptId}
       />
     </div>
   );
